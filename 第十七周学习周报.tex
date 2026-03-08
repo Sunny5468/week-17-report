@@ -1,0 +1,322 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+% 宏包引入
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+
+% 页面设置
+\geometry{left=2.5cm,right=2.5cm,top=3cm,bottom=3cm}
+
+% 页眉页脚设置
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{指导老师：吴少智}
+\fancyhead[R]{撰写人：丁正阳}
+\fancyfoot[C]{\thepage}
+
+% 超链接设置
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+}
+
+% 图表标题设置
+\captionsetup{font=small,labelfont=bf}
+
+\begin{document}
+
+% 标题页
+\begin{center}
+    {\LARGE \textbf{第十七周学习周报}}\\[0.5cm]
+    {\large Out: Feb 14, 2026}\\
+    {\large Due: Feb 20, 2026}\\[0.5cm]
+    {\large 电子科技大学}\\
+    {\large 本科科研项目}\\
+    {\large 脑机与深度学习 \#17}
+\end{center}
+
+\vspace{1cm}
+
+\noindent \textbf{Note:} This article reflects the specific guidance and implementation ideas of policies and regulations over a certain period. Some content may be subject to timeliness issues, and certain conclusions drawn may lack concrete evidence, potentially leading to some logical inconsistencies. Therefore, this article is intended for internal discussion only.
+
+\section{本周学习内容一览}
+
+上周CDAN的实验结果让我意识到，单纯的对抗训练可能不足以解决BCI数据的域偏移问题。本周我尝试了一个新的思路：在CDAN的基础上引入Feature Alignment（特征对齐）机制，形成FA-CDAN方法。理论上，显式的特征对齐应该能够在几何层面上减少域偏移。然而，实验结果再次出乎意料——FA-CDAN的性能不仅没有提升，反而出现了显著下降。这次失败的尝试虽然令人沮丧，但也让我对问题有了更深刻的认识。
+
+\section{FA-CDAN的设计思路}
+
+\subsection{为什么需要特征对齐？}
+
+在分析CDAN的局限性时，我注意到一个问题：对抗训练虽然能够"欺骗"域判别器，但这种对齐是隐式的、间接的。域判别器无法区分域，并不意味着特征分布真的对齐了，可能只是特征变得更加"混乱"，让判别器难以判断。
+
+那么，能否采用更直接的方式来对齐特征分布呢？答案是特征对齐（Feature Alignment）。特征对齐的核心思想是：显式地最小化源域和目标域特征分布之间的距离。
+
+\subsection{FA-CDAN的架构设计}
+
+FA-CDAN结合了两种域适应策略：
+
+\begin{enumerate}
+    \item \textbf{对抗训练}：通过CDAN的条件域判别器进行隐式对齐
+    \item \textbf{特征对齐}：通过最小化特征分布距离进行显式对齐
+\end{enumerate}
+
+架构示意图如下：
+
+\begin{figure}[H]
+\centering
+\begin{verbatim}
+输入EEG信号（源域 + 目标域）
+    ↓
+ATCNet特征提取器
+    ↓
+特征向量 f_s (源域), f_t (目标域)
+    ↓                    ↓
+标签分类器          特征对齐损失
+    ↓                    ↓
+类别预测 p          L_align = ||μ_s - μ_t||²
+    ↓
+f ⊗ p → 域判别器（CDAN）
+    ↓
+L_cdan
+    ↓
+L_total = L_class + λ_cdan·L_cdan + λ_align·L_align
+\end{verbatim}
+\caption{FA-CDAN架构示意图}
+\label{fig:fa_cdan_arch}
+\end{figure}
+
+\subsection{理论依据}
+
+特征对齐的理论依据来自于Maximum Mean Discrepancy（MMD）和CORAL等方法。这些方法通过最小化特征的统计距离来对齐分布。
+
+在FA-CDAN中，我采用了简单的均值对齐策略：
+
+\begin{equation}
+\mathcal{L}_{align} = \|\mu_s - \mu_t\|^2
+\end{equation}
+
+其中$\mu_s$和$\mu_t$分别是源域和目标域特征的均值。这个损失项鼓励两个域的特征中心对齐。
+
+\section{如何实现FA-CDAN？}
+
+\subsection{特征对齐模块的设计}
+
+特征对齐模块的实现相对简单：
+
+\begin{verbatim}
+def feature_alignment_loss(features_source, features_target):
+    # 计算源域和目标域特征的均值
+    mean_source = torch.mean(features_source, dim=0)
+    mean_target = torch.mean(features_target, dim=0)
+    
+    # 计算均值之间的L2距离
+    alignment_loss = torch.norm(mean_source - mean_target, p=2)
+    
+    return alignment_loss
+\end{verbatim}
+
+\subsection{与CDAN的结合方式}
+
+FA-CDAN的总损失函数为：
+
+\begin{equation}
+\mathcal{L}_{total} = \mathcal{L}_{CE}(y, \hat{y}) + \lambda_{cdan}(p) \mathcal{L}_{cdan} + \lambda_{align} \mathcal{L}_{align}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\mathcal{L}_{CE}$是分类损失
+    \item $\mathcal{L}_{cdan}$是CDAN的域对抗损失
+    \item $\mathcal{L}_{align}$是特征对齐损失
+    \item $\lambda_{cdan}(p)$是动态调整的CDAN权重
+    \item $\lambda_{align}$是特征对齐权重（固定为0.1）
+\end{itemize}
+
+\subsection{实现细节}
+
+关键实现细节：
+
+\begin{enumerate}
+    \item \textbf{批次构建}：每个批次同时包含源域和目标域样本
+    \item \textbf{特征提取}：对源域和目标域样本分别提取特征
+    \item \textbf{损失计算}：分别计算三个损失项并加权求和
+    \item \textbf{权重平衡}：通过网格搜索确定$\lambda_{align}$的最优值
+\end{enumerate}
+
+\section{FA-CDAN的实验结果}
+
+\subsection{实验设置}
+
+实验设置与之前保持一致：
+\begin{itemize}
+    \item 数据集：BCI Competition IV 2a
+    \item 训练策略：LOSO交叉验证
+    \item 随机种子：seed 0-1（初步验证）
+    \item 超参数：$\lambda_{align} = 0.1$
+\end{itemize}
+
+\subsection{性能对比}
+
+表\ref{tab:fa_cdan_comparison}展示了FA-CDAN与之前方法的性能对比。
+
+\begin{table}[H]
+\centering
+\caption{FA-CDAN与其他方法的性能对比（seed 0）}
+\label{tab:fa_cdan_comparison}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{方法} & \textbf{准确率 (\%)} & \textbf{Kappa} & \textbf{训练时间 (min)} & \textbf{参数量} \\
+\midrule
+ATCNet & 57.68 $\pm$ 15.66 & 0.436 $\pm$ 0.209 & 66.93 & 113,732 \\
+ATCNet+DANN & 68.67 $\pm$ 11.84 & 0.582 $\pm$ 0.158 & 95.46 & 187,701 \\
+ATCNet+CDAN & 68.79 $\pm$ 11.34 & 0.584 $\pm$ 0.151 & 73.00 & 212,277 \\
+ATCNet+FA-CDAN & 66.82 $\pm$ 15.05 & 0.558 $\pm$ 0.201 & 714.52 & 216,438 \\
+\midrule
+FA-CDAN vs CDAN & \textbf{-1.97\%} & \textbf{-0.026} & \textbf{+641.52} & +4,161 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{FA-CDAN的混淆矩阵}
+
+图\ref{fig:facdan_confmat}展示了FA-CDAN在seed 0上的平均混淆矩阵。可以看出，相比CDAN，FA-CDAN的混淆矩阵对角线元素并不突出，说明分类性能有所下降。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_FA_cdan_seed-0_aug-True_GPU0_20260303_1738/confmats/avg_confusion_matrix.png}
+\caption{FA-CDAN在seed 0上的平均混淆矩阵（9个受试者平均）}
+\label{fig:facdan_confmat}
+\end{figure}
+
+\subsection{受试者级别的详细分析}
+
+表\ref{tab:subject_wise_fa_cdan}展示了FA-CDAN在各受试者上的表现。
+
+\begin{table}[H]
+\centering
+\caption{FA-CDAN在各受试者上的表现对比}
+\label{tab:subject_wise_fa_cdan}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{受试者} & \textbf{CDAN} & \textbf{FA-CDAN} & \textbf{变化} & \textbf{训练时间 (min)} \\
+\midrule
+Subject 1 & 72.22\% & 75.35\% & +3.13\% & 71.34 \\
+Subject 2 & 51.74\% & 50.35\% & -1.39\% & 81.33 \\
+Subject 3 & 89.24\% & 87.85\% & -1.39\% & 101.89 \\
+Subject 4 & 68.75\% & 68.75\% & 0.00\% & 70.80 \\
+Subject 5 & 63.89\% & 39.24\% & \textbf{-24.65\%} & 71.19 \\
+Subject 6 & 54.51\% & 54.86\% & +0.35\% & 69.21 \\
+Subject 7 & 79.51\% & 80.56\% & +1.05\% & 68.99 \\
+Subject 8 & 76.39\% & 79.17\% & +2.78\% & 93.49 \\
+Subject 9 & 62.85\% & 65.28\% & +2.43\% & 86.27 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{为什么结果不好？}
+
+\subsection{性能显著下降}
+
+实验结果令人失望：FA-CDAN的平均准确率比CDAN下降了1.97\%，而训练时间却增加了近10倍（从73分钟增加到715分钟）。这是一个明显的失败。
+
+更糟糕的是，FA-CDAN在Subject 5上的准确率从63.89\%暴跌到39.24\%，下降了24.65\%。这几乎回到了纯ATCNet的水平（26.74\%）。
+
+\subsection{Subject 5的灾难性失败}
+
+Subject 5的性能暴跌是FA-CDAN最大的问题。图\ref{fig:facdan_subject5}展示了FA-CDAN在Subject 5上的训练曲线和混淆矩阵。
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_FA_cdan_seed-0_aug-True_GPU0_20260303_1738/curves/subject_5_acc.png}
+\caption{Subject 5准确率曲线}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_FA_cdan_seed-0_aug-True_GPU0_20260303_1738/curves/subject_5_loss.png}
+\caption{Subject 5损失曲线}
+\end{subfigure}
+\caption{FA-CDAN在Subject 5上的训练曲线。验证准确率仅为39.24\%，相比CDAN的63.89\%下降了24.65\%，几乎回到了ATCNet的水平。}
+\label{fig:facdan_subject5}
+\end{figure}
+
+从图\ref{fig:facdan_subject5}可以看出，FA-CDAN在Subject 5上的验证准确率在训练过程中始终维持在40\%左右，远低于CDAN的64\%。这说明无条件的特征对齐严重破坏了模型的学习能力。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_bcic2a_loso_FA_cdan_seed-0_aug-True_GPU0_20260303_1738/confmats/confmat_subject_5.png}
+\caption{FA-CDAN在Subject 5上的混淆矩阵。可以看出，模型的预测存在严重的类别混淆，特别是在类别1和类别3之间。}
+\label{fig:facdan_subject5_confmat}
+\end{figure}
+
+图\ref{fig:facdan_subject5_confmat}的混淆矩阵进一步证实了FA-CDAN的失败。相比CDAN，FA-CDAN的混淆矩阵显示出更严重的类别混淆，这正是无条件特征对齐破坏类别结构的直接证据。
+
+\subsection{可能的问题：过拟合？}
+
+为什么FA-CDAN的表现这么差呢？我分析了几个可能的原因：
+
+\begin{enumerate}
+    \item \textbf{特征对齐方式不当}：简单的均值对齐可能过于粗糙。不同类别的特征被强制对齐到同一个中心，可能破坏了类别间的判别性。
+    
+    \item \textbf{损失权重不平衡}：三个损失项（分类、CDAN、对齐）之间的权重可能没有调好。特征对齐损失可能过强，压制了分类损失。
+    
+    \item \textbf{训练不稳定}：从训练时间的巨大差异可以看出，FA-CDAN的训练过程可能非常不稳定，需要更多的epoch才能收敛。
+    
+    \item \textbf{过拟合训练集}：由于训练时间过长，模型可能过度拟合了训练集中的源域受试者，导致在目标域上泛化能力下降。
+\end{enumerate}
+
+\subsection{特征对齐方式不当？}
+
+深入思考后，我认为最主要的问题是：\textbf{无条件的特征对齐破坏了类别结构}。
+
+FA-CDAN的特征对齐是全局的、无条件的，即不考虑类别信息地对齐所有特征的均值。但在分类任务中，不同类别的特征本应该是分离的。强制对齐所有特征的均值，相当于把不同类别的特征"挤"到一起，这显然会损害分类性能。
+
+举个例子：假设源域的"左手"特征均值在$\mu_s^{left}$，"右手"特征均值在$\mu_s^{right}$。目标域的对应均值在$\mu_t^{left}$和$\mu_t^{right}$。FA-CDAN试图对齐全局均值$\mu_s = (\mu_s^{left} + \mu_s^{right})/2$和$\mu_t = (\mu_t^{left} + \mu_t^{right})/2$，但这可能导致$\mu_t^{left}$被错误地拉向$\mu_s^{right}$，造成类别混淆。
+
+\section{反思与教训}
+
+\subsection{失败也是一种收获}
+
+虽然FA-CDAN的实验失败了，但这次失败让我学到了很多：
+
+\begin{enumerate}
+    \item \textbf{理论与实践的差距}：理论上合理的方法在实践中可能失效。特征对齐听起来很美好，但实现方式至关重要。
+    
+    \item \textbf{类别信息的重要性}：在域适应中，必须考虑类别信息。无论是对抗训练还是特征对齐，都应该是类别条件的。
+    
+    \item \textbf{简单不一定好}：简单的均值对齐过于粗糙，无法捕捉特征分布的复杂结构。
+    
+    \item \textbf{训练效率的重要性}：10倍的训练时间增加是不可接受的，即使性能有提升也不值得。
+\end{enumerate}
+
+\subsection{新的改进方向}
+
+基于FA-CDAN的失败，我开始思考：能否设计一种\textbf{类别条件的特征对齐}方法？
+
+具体思路是：不是对齐全局特征均值，而是对齐每个类别的特征统计量。这样既能减少域偏移，又能保持类别间的判别性。
+
+文献调研发现，Class-Conditional CORAL（CCCORAL）正是这样一种方法。CCCORAL通过对齐每个类别的二阶统计量（协方差矩阵），实现了类别条件的特征对齐。
+
+下周我将深入研究CCCORAL，并尝试将其与CDAN结合，形成CDAN+CCCORAL方法。这次我会更加谨慎，充分考虑类别信息的作用。
+
+\section{小结}
+
+本周尝试了FA-CDAN方法，但实验结果令人失望。FA-CDAN不仅没有提升性能，反而导致准确率下降1.97\%，训练时间增加10倍。通过深入分析，我认识到无条件的特征对齐会破坏类别结构，这是失败的根本原因。
+
+这次失败让我陷入了深思：为什么简单的均值对齐会如此糟糕？问题的关键在于"无条件"三个字。FA-CDAN对齐的是所有样本的全局均值，完全不考虑类别信息。这就像把苹果和橙子混在一起求平均——得到的既不是苹果也不是橙子。
+
+那么，如果我们为每个类别分别进行特征对齐呢？如果不是对齐一阶统计量（均值），而是对齐二阶统计量（协方差矩阵）呢？文献中提到的Class-Conditional CORAL（CCCORAL）似乎正是这个思路。它会成为突破口吗？下周的实验将揭晓答案。
+
+\end{document}
